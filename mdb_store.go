@@ -2,10 +2,12 @@ package raftmdb
 
 import (
 	"fmt"
-	"github.com/armon/gomdb"
-	"github.com/hashicorp/raft"
 	"os"
 	"path/filepath"
+
+	"github.com/armon/gomdb"
+	"github.com/stackengine/raft"
+	"github.com/ugorji/go/codec"
 )
 
 const (
@@ -23,19 +25,20 @@ type MDBStore struct {
 	env     *mdb.Env
 	path    string
 	maxSize uint64
+	mh      *codec.MsgpackHandle
 }
 
 // NewMDBStore returns a new MDBStore and potential
 // error. Requres a base directory from which to operate.
 // Uses the default maximum size.
-func NewMDBStore(base string) (*MDBStore, error) {
-	return NewMDBStoreWithSize(base, 0)
+func NewMDBStore(mh *codec.MsgpackHandle, base string) (*MDBStore, error) {
+	return NewMDBStoreWithSize(mh, base, 0)
 }
 
 // NewMDBStore returns a new MDBStore and potential
 // error. Requres a base directory from which to operate,
 // and a maximum size. If maxSize is not 0, a default value is used.
-func NewMDBStoreWithSize(base string, maxSize uint64) (*MDBStore, error) {
+func NewMDBStoreWithSize(mh *codec.MsgpackHandle, base string, maxSize uint64) (*MDBStore, error) {
 	// Get the paths
 	path := filepath.Join(base, mdbPath)
 	if err := os.MkdirAll(path, 0755); err != nil {
@@ -58,6 +61,7 @@ func NewMDBStoreWithSize(base string, maxSize uint64) (*MDBStore, error) {
 		env:     env,
 		path:    path,
 		maxSize: maxSize,
+		mh:      mh,
 	}
 
 	// Initialize the db
@@ -194,7 +198,7 @@ func (m *MDBStore) GetLog(index uint64, logOut *raft.Log) error {
 	}
 
 	// Convert the value to a log
-	return decodeMsgPack(val, logOut)
+	return decodeMsgPack(m.mh, val, logOut)
 }
 
 // Stores a log entry
@@ -213,7 +217,7 @@ func (m *MDBStore) StoreLogs(logs []*raft.Log) error {
 	for _, log := range logs {
 		// Convert to an on-disk format
 		key := uint64ToBytes(log.Index)
-		val, err := encodeMsgPack(log)
+		val, err := encodeMsgPack(m.mh, log)
 		if err != nil {
 			tx.Abort()
 			return err
@@ -251,7 +255,7 @@ DELETE:
 	return tx.Commit()
 }
 
-// innerDeleteRange does a single pass to delete the indexes (inclusively)
+// innerDeleteRange does a singel pass to delete the indexes (inclusively)
 func (m *MDBStore) innerDeleteRange(tx *mdb.Txn, dbis []mdb.DBI, minIdx, maxIdx uint64) (num int, err error) {
 	// Open a cursor
 	cursor, err := tx.CursorOpen(dbis[0])
@@ -275,7 +279,7 @@ func (m *MDBStore) innerDeleteRange(tx *mdb.Txn, dbis []mdb.DBI, minIdx, maxIdx 
 		} else {
 			key, _, err = cursor.Get(nil, mdb.NEXT)
 		}
-		if err == mdb.NotFound || len(key) == 0 {
+		if err == mdb.NotFound {
 			break
 		} else if err != nil {
 			return num, err
@@ -298,6 +302,19 @@ func (m *MDBStore) innerDeleteRange(tx *mdb.Txn, dbis []mdb.DBI, minIdx, maxIdx 
 		num++
 	}
 	return num, nil
+}
+
+func (m *MDBStore) Drop() error {
+	tx, dbis, err := m.startTxn(false, dbConf)
+	if err != nil {
+		return err
+	}
+
+	if err := tx.Drop(dbis[0], 0); err != nil {
+		tx.Abort()
+		return err
+	}
+	return tx.Commit()
 }
 
 // Set a K/V pair

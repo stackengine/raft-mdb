@@ -2,13 +2,17 @@ package raftmdb
 
 import (
 	"bytes"
-	"github.com/hashicorp/raft"
 	"io/ioutil"
 	"os"
 	"testing"
+
+	"github.com/stackengine/raft"
+	"github.com/ugorji/go/codec"
 )
 
-func MDBTestStore(t testing.TB) (string, *MDBStore) {
+var Mh = &codec.MsgpackHandle{RawToString: true, WriteExt: true}
+
+func MDBTestStore(t *testing.T) (string, *MDBStore) {
 	// Create a test dir
 	dir, err := ioutil.TempDir("", "raft")
 	if err != nil {
@@ -16,7 +20,7 @@ func MDBTestStore(t testing.TB) (string, *MDBStore) {
 	}
 
 	// New level
-	store, err := NewMDBStore(dir)
+	store, err := NewMDBStore(Mh, dir)
 	if err != nil {
 		t.Fatalf("err: %v ", err)
 	}
@@ -41,7 +45,7 @@ func TestMDB_SetGet(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	// New level
-	l, err := NewMDBStore(dir)
+	l, err := NewMDBStore(Mh, dir)
 	if err != nil {
 		t.Fatalf("err: %v ", err)
 	}
@@ -69,6 +73,47 @@ func TestMDB_SetGet(t *testing.T) {
 	}
 }
 
+func TestMDB_Drop(t *testing.T) {
+	// Create a test dir
+	dir, err := ioutil.TempDir("", "raft")
+	if err != nil {
+		t.Fatalf("err: %v ", err)
+	}
+	defer os.RemoveAll(dir)
+
+	// New level
+	l, err := NewMDBStore(Mh, dir)
+	if err != nil {
+		t.Fatalf("err: %v ", err)
+	}
+	defer l.Close()
+
+	key := []byte("foobar")
+	val := []byte("this is a test value")
+	if err := l.Set(key, val); err != nil {
+		t.Fatalf("err: %v ", err)
+	}
+
+	out, err := l.Get(key)
+	if err != nil {
+		t.Fatalf("err: %v ", err)
+	}
+
+	if bytes.Compare(val, out) != 0 {
+		t.Fatalf("did not get result back: %v %v", val, out)
+	}
+
+	// now drop the db
+	err = l.Drop()
+	if err != nil {
+		t.Fatalf("err: %v ", err)
+	}
+	_, err = l.Get(key)
+	if err.Error() != "not found" {
+		t.Fatalf("err: %v ", err)
+	}
+}
+
 func TestMDB_SetGetUint64(t *testing.T) {
 	// Create a test dir
 	dir, err := ioutil.TempDir("", "raft")
@@ -78,7 +123,7 @@ func TestMDB_SetGetUint64(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	// New level
-	l, err := NewMDBStore(dir)
+	l, err := NewMDBStore(Mh, dir)
 	if err != nil {
 		t.Fatalf("err: %v ", err)
 	}
@@ -123,7 +168,7 @@ func TestMDB_Logs(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	// New level
-	l, err := NewMDBStore(dir)
+	l, err := NewMDBStore(Mh, dir)
 	if err != nil {
 		t.Fatalf("err: %v ", err)
 	}
@@ -218,8 +263,8 @@ func TestMDB_Logs(t *testing.T) {
 
 	// Verify they are all deleted
 	for i := 5; i <= 20; i++ {
-		if err := l.GetLog(uint64(i), &out); err != raft.ErrLogNotFound {
-			t.Fatalf("err: %v ", err)
+		if err := l.GetLog(uint64(i), &out); err.Error() != "log not found" {
+			t.Fatalf("err: %#v expecting: %#v", err, raft.ErrLogNotFound)
 		}
 	}
 
